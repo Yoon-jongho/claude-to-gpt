@@ -15,10 +15,33 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ─────────────────────────────────────────────
+// .env 로드 (선택)
+//
+// MCP 서버는 클라이언트가 서브프로세스로 실행하므로 cwd가 예측 불가능하다.
+// 따라서 상대경로가 아니라 이 파일 기준 절대경로로 읽는다.
+//
+// process.loadEnvFile은 "이미 설정된 환경변수는 덮어쓰지 않는다".
+// 즉 우선순위는 다음과 같다:
+//   claude mcp add --env  >  셸 환경변수  >  .env 파일
+// Node 20.12+ 에서만 존재하므로 가드를 둔다.
+// ─────────────────────────────────────────────
+if (typeof process.loadEnvFile === "function") {
+  try {
+    process.loadEnvFile(path.join(__dirname, ".env"));
+  } catch {
+    // .env가 없으면 그냥 넘어간다 (--env 또는 셸 환경변수로 동작)
+  }
+}
+
 // OpenAI API 초기화
 const apiKey = process.env.OPENAI_API_KEY;
 if (!apiKey) {
-  console.error("Error: OPENAI_API_KEY environment variable is required");
+  console.error(
+    "Error: OPENAI_API_KEY is required.\n" +
+      "  1) 프로젝트 루트에 .env 파일을 만들고 OPENAI_API_KEY=sk-... 를 넣거나 (Node 20.12+)\n" +
+      "  2) claude mcp add --env OPENAI_API_KEY=sk-... 로 전달하세요."
+  );
   process.exit(1);
 }
 
