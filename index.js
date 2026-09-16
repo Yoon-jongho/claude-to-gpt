@@ -133,6 +133,17 @@ function formatUsage(response) {
   return ` | tokens: ${parts.join(" / ")}`;
 }
 
+/** MP4 버퍼를 generated_videos/ 에 저장. */
+function saveVideoBuffer(buffer, filename) {
+  const outputDir = path.join(__dirname, "generated_videos");
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true });
+  }
+  const filePath = path.join(outputDir, filename);
+  fs.writeFileSync(filePath, buffer);
+  return filePath;
+}
+
 /** base64 이미지를 generated_images/ 에 저장. */
 function saveBase64Image(b64, filename) {
   const outputDir = path.join(__dirname, "generated_images");
@@ -390,6 +401,49 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               minimum: 1,
               maximum: 4,
               default: 1,
+            },
+          },
+          required: ["prompt"],
+        },
+      },
+      {
+        name: "generate_video",
+        description:
+          "Generate a video using OpenAI's Sora model from a text prompt. Video generation is asynchronous and may take several minutes to complete. The finished MP4 is saved to generated_videos/ and the file path is returned. Note: real people, copyrighted characters/music, and human-likeness content are blocked by the API.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            prompt: {
+              type: "string",
+              description:
+                "Detailed description of the video. For best results include shot type, subject, action, setting, and lighting. Example: 'Wide tracking shot of a teal coupe driving through a desert highway, heat ripples visible, hard sun overhead.'",
+            },
+            model: {
+              type: "string",
+              description:
+                "'sora-2' for fast iteration and drafts; 'sora-2-pro' for production-quality output — use with 1920x1080 or 1080x1920 when you need maximum fidelity (slower and more expensive)",
+              enum: ["sora-2", "sora-2-pro"],
+              default: "sora-2",
+            },
+            size: {
+              type: "string",
+              description:
+                "Video resolution. 1920x1080 and 1080x1920 require sora-2-pro.",
+              enum: [
+                "480x854",
+                "854x480",
+                "1280x720",
+                "720x1280",
+                "1920x1080",
+                "1080x1920",
+              ],
+              default: "1280x720",
+            },
+            seconds: {
+              type: "number",
+              description: "Duration in seconds.",
+              enum: [5, 8, 10, 15, 16, 20],
+              default: 8,
             },
           },
           required: ["prompt"],
@@ -694,6 +748,63 @@ Structure your response as:
             text: `[GPT Image 2 - Edit]\n\nPrompt: ${prompt}\nSources: ${image_paths.length} image(s)${
               mask_path ? " + mask" : ""
             }\n\nSaved:\n${lines.join("\n")}`,
+          },
+        ],
+      };
+    }
+
+    // ── generate_video ───────────────────────
+    if (name === "generate_video") {
+      const {
+        prompt,
+        model = "sora-2",
+        size = "1280x720",
+        seconds = 8,
+      } = args;
+
+      // 렌더 잡 시작
+      let video = await openai.videos.create({
+        model,
+        prompt,
+        size,
+        seconds: String(seconds),
+      });
+
+      // 완료될 때까지 폴링 (최대 20분)
+      const MAX_WAIT_MS = 20 * 60 * 1000;
+      const POLL_INTERVAL_MS = 10_000;
+      const startTime = Date.now();
+
+      while (video.status === "queued" || video.status === "in_progress") {
+        if (Date.now() - startTime > MAX_WAIT_MS) {
+          throw new Error(
+            `Video generation timed out after 20 minutes. Job ID: ${video.id}. Check status manually via GET /videos/${video.id}.`
+          );
+        }
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+        video = await openai.videos.retrieve(video.id);
+      }
+
+      if (video.status === "failed") {
+        const reason = video.error?.message || "unknown";
+        throw new Error(`Video generation failed: ${reason}`);
+      }
+
+      // MP4 다운로드
+      const content = await openai.videos.downloadContent(video.id);
+      const buffer = Buffer.from(await content.arrayBuffer());
+
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const filename = `sora_${timestamp}.mp4`;
+      const filePath = saveVideoBuffer(buffer, filename);
+
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `[Sora ${model}]\n\nPrompt: ${prompt}\nSize: ${size} | Duration: ${seconds}s\nGeneration time: ${elapsed}s\n\nSaved: ${filePath}`,
           },
         ],
       };
